@@ -1,0 +1,14 @@
+[package]
+name = "multi-platform-medical-imaging"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vulkanalia = { version = "=0.33.0", features = ["libloading", "window"] }
+winit = "0.29"
+cgmath = "0.18"
+
+[[test]]
+name = "test_displaying"
+path = "tests/test_displaying.rs"
+harness = false 
