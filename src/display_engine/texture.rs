@@ -1,33 +1,60 @@
+use vulkanalia::prelude::v1_0::*;
 
-pub struct TextureFormat {
-    pub width: usize,
-    pub height: usize,
-    pub bytes_per_pixel: usize,
+#[derive(Clone, PartialEq, Debug)]
+pub enum TextureColorFormat {
+    GrayScale8Bit,
 }
 
+#[derive(Clone, Debug)]
+pub struct TextureDescription {
+    pub width: usize,
+    pub height: usize,
+    pub format: TextureColorFormat
+}
+
+impl PartialEq for TextureDescription {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width &&
+        self.height == other.height &&
+        self.format == other.format
+    }
+}
+
+impl TextureDescription {
+    pub fn size(&self) -> usize {
+        match self.format {
+            TextureColorFormat::GrayScale8Bit => self.width * self.height * 4,
+            _ => 0
+        }
+    }
+
+    pub fn vk_format(&self) -> vk::Format {
+        match self.format {
+            TextureColorFormat::GrayScale8Bit => vk::Format::R8G8B8A8_UNORM,
+        }
+    }
+}
 pub struct Texture {
     pub texture_bytes: Vec<u8>,
-    pub format: TextureFormat,
+    pub description: TextureDescription,
 }
 
 #[derive(Debug)]
 pub enum TextureError {
     FileReadError,
     DimensionsParseError,
+    UnexpectedTextureDescription,
     UnexpectedFileFormat,
     UnexpectedFilePath
 }
 
-impl PartialEq for TextureFormat {
-    fn eq(&self, other: &Self) -> bool {
-        self.width == other.width &&
-        self.height == other.height &&
-        self.bytes_per_pixel == other.bytes_per_pixel
-    }
-}
 
 impl Texture {
-    pub fn from_raw_file(path: &std::path::Path) -> Result<Self, TextureError> {
+    pub fn from_raw_file(path: &std::path::Path, description: &TextureDescription) -> Result<Self, TextureError> {
+        if description.format != TextureColorFormat::GrayScale8Bit {
+            return Err(TextureError::UnexpectedTextureDescription);
+        }
+
         let filename = match path.file_name() {
             Some(filename) => match filename.to_str() {
                 Some(name_str) => name_str,
@@ -41,15 +68,6 @@ impl Texture {
             None => return Err(TextureError::UnexpectedFileFormat),
             Some(_) => {}
         }
-        let stripped_path = filename.replace(".raw", "");
-        let name_fields = stripped_path.split("x")
-                                       .collect::<Vec<&str>>();
-        let width = name_fields[0].parse::<u32>().map_err(|_| TextureError::DimensionsParseError)?;
-        let height = name_fields[1].parse::<u32>().map_err(|_| TextureError::DimensionsParseError)?;
-        if name_fields[2] != "u8" {
-            return Err(TextureError::UnexpectedFileFormat);
-        }
-        let bytes_per_pixel = 4;
 
         let texture_pure_bytes = std::fs::read(path)
             .map_err(|_| TextureError::FileReadError)?;
@@ -63,11 +81,7 @@ impl Texture {
 
         Ok(Texture {
             texture_bytes,
-            format: TextureFormat {
-                width: width as usize,
-                height: height as usize,
-                bytes_per_pixel
-            }
+            description: description.clone(),
         })
     }
 
@@ -77,17 +91,23 @@ impl Texture {
 }
 
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_texture_from_raw_file() {
-        let path = std::path::Path::new("data/976x976xu8.raw");
-        let res = Texture::from_raw_file(&path);
+        let path = std::path::Path::new("data/838x1024xu8.raw");
+        let desc = TextureDescription {
+            width: 838,
+            height: 1024,
+            format: TextureColorFormat::GrayScale8Bit,
+        };
+        let res = Texture::from_raw_file(&path, &desc);
         assert!(res.is_ok());
         let texture = res.unwrap();
-        assert_eq!(texture.format.width, 976);
-        assert_eq!(texture.format.height, 976);
-        assert_eq!(texture.format.bytes_per_pixel, 4);
+        assert_eq!(texture.description.width, 838);
+        assert_eq!(texture.description.height, 1024);
+        assert_eq!(texture.description.format, TextureColorFormat::GrayScale8Bit);
     }
 }

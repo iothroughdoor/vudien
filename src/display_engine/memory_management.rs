@@ -1,12 +1,15 @@
 use vulkanalia::prelude::v1_0::*;
+use super::device_queue::{DeviceQueue, DeviceQueueError};
 
 pub enum MemoryManagementError {
+    UnknownError,
     MemoryRequirementsError, 
     BufferCreationError,
     ImageCreationError,
     ImageViewCreationError,
     DeviceMemoryAllocationError,
-    BindingError
+    BindingError,
+    CommandError,
 }
 
 pub fn get_memory_type_index(physical_device_memory_properties: &vk::PhysicalDeviceMemoryProperties, 
@@ -157,4 +160,32 @@ pub fn create_image_view(logical_device: &Device,
         Ok(logical_device.create_image_view(&info, None)
                          .map_err(|_| MemoryManagementError::ImageViewCreationError)?)
     }
+}
+
+pub fn copy_buffer(
+    logical_device: &Device,
+    source: vk::Buffer,
+    destination: vk::Buffer,
+    size: vk::DeviceSize,
+    graphics_queue: &DeviceQueue,
+) -> Result<(), MemoryManagementError> {
+    unsafe {
+        let command_buffer = graphics_queue
+            .begin_single_time_commands(logical_device)
+            .map_err(|e| match e {
+                DeviceQueueError::CommandBufferBeginError => MemoryManagementError::CommandError,
+                DeviceQueueError::CommandBufferAllocationError => MemoryManagementError::CommandError,
+                _ => MemoryManagementError::UnknownError,
+            })?;
+
+        let regions = vk::BufferCopy::builder().size(size);
+
+        logical_device.cmd_copy_buffer(command_buffer, source, destination, &[regions]);
+
+        graphics_queue
+            .end_single_time_commands(logical_device, command_buffer)
+            .map_err(|_| MemoryManagementError::CommandError)?;
+    }
+
+    Ok(())
 }

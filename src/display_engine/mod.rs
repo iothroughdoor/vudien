@@ -13,11 +13,11 @@ use vulkanalia::vk::{KhrSurfaceExtensionInstanceCommands, KhrSwapchainExtensionD
 use cgmath::{vec3, Deg};
 
 use swapchain::SwapchainSupportDetails;
-use swapchain::Swapchain;
-use device_queue::{DeviceQueue, DeviceQueueError};
+use swapchain::{Swapchain, SwapchainError};
+use device_queue::{DeviceQueue};
 use graphics_pipeline::{Mat4, UniformBufferObject};
-use texture::Texture;
-use gpu_transfer::{TextureUploader,TextureUploaderError};
+use texture::{Texture, TextureDescription};
+use gpu_transfer::{TextureUploader, TextureUploaderError, VertexUploader};
 
 const VALIDATION_ENABLED: bool =
     cfg!(debug_assertions);
@@ -25,11 +25,8 @@ const VALIDATION_ENABLED: bool =
 const VALIDATION_LAYER: vk::ExtensionName =
     vk::ExtensionName::from_bytes(b"VK_LAYER_KHRONOS_validation");
 
-const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
-const TEXTURE_WIDTH: u32 = 976;
-const TEXTURE_HEIGHT: u32 = 976;
-const PIXEL_DEPTH_IN_BYTES: u32 = 1;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+const DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
 
 #[derive(Debug)]
 pub enum DisplayEngineError {
@@ -48,83 +45,78 @@ pub enum DisplayEngineError {
     PresentModeNotSupported,
     UnsupportedTextureFormat,
     CommandError,
+    DeviceWaitIdleError,
 }
 
 pub struct DisplayEngine {
     vk_instance: Instance,
     surface: vk::SurfaceKHR,
-    physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     logical_device: Device,
+    physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
     graphics_queue: DeviceQueue,
     present_queue: DeviceQueue,
     swapchain: Swapchain,
+    swapchain_support: SwapchainSupportDetails,
     pipeline: graphics_pipeline::Pipeline,
     render_pass: vk::RenderPass,
     image_available_semaphores: Vec<vk::Semaphore>, // one for each frame in flight
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
-    vertex_buffer: Option<vk::Buffer>,
-    vertex_device_memory: Option<vk::DeviceMemory>,
-    index_buffer: Option<vk::Buffer>,
-    index_device_memory: Option<vk::DeviceMemory>,
     texture_uploader: TextureUploader,
+    vertex_uploader: VertexUploader,
+    texture_description: TextureDescription,
     texture_sampler: vk::Sampler,
 }
 
 
 impl DisplayEngine {
-    pub fn new(window: &winit::window::Window) -> Result<Self, DisplayEngineError> {
+    pub fn new(window: &winit::window::Window, texture_description: &TextureDescription) -> Result<Self, DisplayEngineError> {
         let vk_instance = Self::create_vk_instance(&window)?;
 
         let surface = unsafe { 
             vulkanalia::window::create_surface(&vk_instance, &window, &window)
-                               .map_err(|_| DisplayEngineError::InitializationError)? 
+                .map_err(|_| DisplayEngineError::InitializationError)? 
         };
 
-        let device_extensions = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
         let (physical_device, 
              graphics_queue_family_index, 
              present_queue_family_index) = 
-        Self::select_physical_device(&vk_instance, &surface, device_extensions)?;
+        Self::select_physical_device(&vk_instance, &surface, DEVICE_EXTENSIONS, texture_description)?;
 
-        let logical_device = Self::create_logical_device(graphics_queue_family_index, 
-                                                         present_queue_family_index, 
-                                                         physical_device, 
-                                                         &vk_instance, 
-                                                         device_extensions)?;
+        let logical_device = Self::create_logical_device(
+            graphics_queue_family_index, 
+            present_queue_family_index, 
+            physical_device, 
+            &vk_instance, 
+            DEVICE_EXTENSIONS
+        )?;
+
         let mut graphics_queue = unsafe {
             let handle = logical_device.get_device_queue(graphics_queue_family_index, 0);
-            DeviceQueue {
-                family_index: graphics_queue_family_index,
-                handle,
-                command_pool: Option::None,
-                command_buffers: Option::None
-            }
+            DeviceQueue::new(graphics_queue_family_index, handle, &logical_device)
+                .map_err(|_| DisplayEngineError::InitializationError)?
         };
         let present_queue = unsafe {
             let handle = logical_device.get_device_queue(present_queue_family_index, 0);
-            DeviceQueue {
-                family_index: present_queue_family_index,
-                handle,
-                command_pool: Option::None,
-                command_buffers: Option::None
-            }
+            DeviceQueue::new(present_queue_family_index, handle, &logical_device)
+                .map_err(|_| DisplayEngineError::InitializationError)?
         };
 
         let swapchain_support = SwapchainSupportDetails::new(&vk_instance, physical_device, surface)
-                                                        .map_err(|_| DisplayEngineError::InitializationError)?;
-        let mut swapchain = Self::create_swapchain(&swapchain_support, 
-                                                   &logical_device, 
-                                                   surface, 
-                                                   window, 
-                                                   &graphics_queue, 
-                                                   &present_queue)
-                                 .map_err(|_| DisplayEngineError::InitializationError)?;
+            .map_err(|_| DisplayEngineError::InitializationError)?;
+        let mut swapchain = Self::create_swapchain(
+            &swapchain_support, 
+            &logical_device, 
+            surface, 
+            window, 
+            &graphics_queue, 
+            &present_queue,
+            texture_description.vk_format()
+        ).map_err(|_| DisplayEngineError::InitializationError)?;
 
-        graphics_queue.create_command_infrastructure(&logical_device, swapchain.image_count())
-                      .map_err(|_| DisplayEngineError::InitializationError)?;
-
+        graphics_queue.allocate_command_buffers(&logical_device, swapchain.image_count())
+            .map_err(|_| DisplayEngineError::InitializationError)?;
 
         let render_pass = Self::create_render_pass(&logical_device, swapchain.image_format())
                                .map_err(|_| DisplayEngineError::InitializationError)?;
@@ -153,9 +145,13 @@ impl DisplayEngine {
             vk_instance.get_physical_device_memory_properties(physical_device)
         };
 
-        let texture_uploader = TextureUploader::new(TEXTURE_WIDTH, 
-                                                    TEXTURE_HEIGHT, 
-                                                    COLOR_FORMAT, 
+        let vertex_uploader = VertexUploader::new(&logical_device, &physical_device_memory_properties)
+            .map_err(|_| DisplayEngineError::InitializationError)?;
+        let _ = vertex_uploader
+                    .upload(&logical_device, &graphics_queue)
+                    .map_err(|_| DisplayEngineError::InitializationError)?;
+
+        let texture_uploader = TextureUploader::new(texture_description, 
                                                     &logical_device, 
                                                     &physical_device_memory_properties)
             .map_err(|_| DisplayEngineError::InitializationError)?;
@@ -181,86 +177,100 @@ impl DisplayEngine {
                 .map_err(|_| DisplayEngineError::InitializationError)?
         };
 
-        let pipeline = graphics_pipeline::Pipeline::new(&logical_device, 
-                                                        &swapchain, 
-                                                        render_pass, 
-                                                        "D:\\dev\\multi-platform-medical-imaging\\data", 
-                                                        &physical_device_memory_properties, 
-                                                        texture_uploader.texture_image_view,
-                                                        texture_sampler)
-            .map_err(|_| DisplayEngineError::InitializationError)?;
+        let pipeline = graphics_pipeline::Pipeline::new(
+            &logical_device, 
+            &swapchain, 
+            render_pass, 
+            "D:\\dev\\multi-platform-medical-imaging\\data", 
+            &physical_device_memory_properties, 
+            texture_uploader.texture_image_view,
+            texture_sampler
+        ).map_err(|_| DisplayEngineError::InitializationError)?;
+
+        graphics_queue.record_drawing_command_buffers(
+            &logical_device, 
+            &swapchain, 
+            render_pass, 
+            &pipeline, 
+            vertex_uploader.vertex_buffer,
+            vertex_uploader.index_buffer,
+            gpu_transfer::INDICES.len()
+        );
 
         return Ok(DisplayEngine{vk_instance, 
                                 surface, 
-                                physical_device_memory_properties,
                                 logical_device, 
+                                physical_device_memory_properties,
                                 graphics_queue, 
                                 present_queue,
                                 swapchain,
+                                swapchain_support,
                                 pipeline,
                                 render_pass,
                                 image_available_semaphores,
                                 render_finished_semaphores,
                                 in_flight_fences,
-                                vertex_buffer: None,
-                                vertex_device_memory: None,
-                                index_buffer: None,
-                                index_device_memory: None,
                                 texture_uploader,
+                                vertex_uploader,
                                 texture_sampler,
+                                texture_description: texture_description.clone(),
                                 current_frame: 0
                                 });
 
     }
 
-    pub fn upload_indices(&mut self, indices: &[u16]) -> Result<(), DisplayEngineError> {
-        let size = std::mem::size_of::<u16>() * indices.len();
-        let (staging_buffer, staging_buffer_dev_memory) = memory_management::create_buffer(
-            &self.logical_device,
-            size as vk::DeviceSize,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            &self.physical_device_memory_properties
-        ).map_err(|_| DisplayEngineError::MemoryError)?;
-        let host_mapped_memory = unsafe {
-            self.logical_device.map_memory(staging_buffer_dev_memory,
-                                           0, 
-                                           size as vk::DeviceSize,
-                                           vk::MemoryMapFlags::empty())
-                                .map_err(|_| DisplayEngineError::MemoryError)?
-        };
+    fn recreate_swapchain(&mut self, window: &winit::window::Window) -> Result<(), DisplayEngineError> {
         unsafe {
-            memcpy(
-                indices.as_ptr(),
-                host_mapped_memory.cast(),
-                indices.len()
-            );
-            self.logical_device.unmap_memory(staging_buffer_dev_memory);
-        };
-
-
-        let (index_buffer, index_device_memory) = memory_management::create_buffer(
-            &self.logical_device,
-            size as vk::DeviceSize,
-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &self.physical_device_memory_properties
-        ).map_err(|_| DisplayEngineError::MemoryError)?;
-
-        self.copy_buffer(
-            &self.logical_device,
-            staging_buffer,
-            index_buffer,
-            size as vk::DeviceSize,
-        )?;
-
+            self.logical_device.device_wait_idle().map_err(|_| DisplayEngineError::DeviceWaitIdleError)?;
+        }
+        self.swapchain.destroy(&self.logical_device);
+        self.graphics_queue.destroy_command_buffers(&self.logical_device);
+        self.pipeline.destroy(&self.logical_device);
         unsafe {
-            self.logical_device.destroy_buffer(staging_buffer, None);
-            self.logical_device.free_memory(staging_buffer_dev_memory, None);
-        };
+            self.logical_device.destroy_render_pass(self.render_pass, None);
+        }
 
-        self.index_buffer = Some(index_buffer);
-        self.index_device_memory = Some(index_device_memory);
+        self.swapchain = Self::create_swapchain(
+            &self.swapchain_support, 
+            &self.logical_device, 
+            self.surface, 
+            window, 
+            &self.graphics_queue, 
+            &self.present_queue,
+            self.texture_description.vk_format()
+        ).map_err(|_| DisplayEngineError::InitializationError)?;
+
+        self.graphics_queue
+            .allocate_command_buffers(&self.logical_device, self.swapchain.image_count())
+            .map_err(|_| DisplayEngineError::InitializationError)?;
+
+        self.render_pass = Self::create_render_pass(&self.logical_device, self.swapchain.image_format())
+            .map_err(|_| DisplayEngineError::InitializationError)?;
+
+        self.swapchain
+            .create_framebuffers(&self.logical_device, self.render_pass)
+            .map_err(|_| DisplayEngineError::InitializationError)?;
+    
+        self.pipeline = graphics_pipeline::Pipeline::new(
+            &self.logical_device, 
+            &self.swapchain, 
+            self.render_pass, 
+            "D:\\dev\\multi-platform-medical-imaging\\data", 
+            &self.physical_device_memory_properties, 
+            self.texture_uploader.texture_image_view,
+            self.texture_sampler
+        ).map_err(|_| DisplayEngineError::InitializationError)?;
+
+        self.graphics_queue.record_drawing_command_buffers(
+            &self.logical_device, 
+            &self.swapchain, 
+            self.render_pass, 
+            &self.pipeline, 
+            self.vertex_uploader.vertex_buffer,
+            self.vertex_uploader.index_buffer,
+            gpu_transfer::INDICES.len()
+        );
+
 
         Ok(())
     }
@@ -272,84 +282,13 @@ impl DisplayEngine {
                     &self.graphics_queue)
             .map_err(|e| {
                 match e {
-                    TextureUploaderError::UnsupportedFormat => DisplayEngineError::UnsupportedTextureFormat,
+                    TextureUploaderError::UnsupportedTexture => DisplayEngineError::UnsupportedTextureFormat,
                     _ => {DisplayEngineError::UnknownError}
                 }
             }) 
     }
 
-    fn copy_buffer(
-        &self,
-        logical_device: &Device,
-        source: vk::Buffer,
-        destination: vk::Buffer,
-        size: vk::DeviceSize,
-    ) -> Result<(), DisplayEngineError> {
-        unsafe {
-            let command_buffer = self.graphics_queue
-                .begin_single_time_commands(logical_device)
-                .map_err(|e| match e {
-                    DeviceQueueError::CommandBufferBeginError => DisplayEngineError::CommandError,
-                    DeviceQueueError::CommandBufferAllocationError => DisplayEngineError::MemoryError,
-                    _ => DisplayEngineError::UnknownError,
-                })?;
-
-            let regions = vk::BufferCopy::builder().size(size);
-
-            logical_device.cmd_copy_buffer(command_buffer, source, destination, &[regions]);
-
-            self.graphics_queue
-                .end_single_time_commands(logical_device, command_buffer)
-                .map_err(|_| DisplayEngineError::CommandError)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn upload_vertices(&mut self, vertices: &[graphics_pipeline::Vertex], indices: &[u16]) -> Result<(), DisplayEngineError> {
-        let (vertex_buffer, vertex_device_memory) = memory_management::create_buffer(
-            &self.logical_device,
-            (std::mem::size_of::<graphics_pipeline::Vertex>() * vertices.len()) as vk::DeviceSize,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            &self.physical_device_memory_properties
-        ).map_err(|_| DisplayEngineError::MemoryError)?;
-
-        let host_mapped_memory = unsafe {
-            self.logical_device.map_memory(vertex_device_memory,
-                                           0, 
-                                           (std::mem::size_of::<graphics_pipeline::Vertex>() * vertices.len()) as vk::DeviceSize,
-                                           vk::MemoryMapFlags::empty())
-                                .map_err(|_| DisplayEngineError::MemoryError)?
-        };
-        unsafe {
-            memcpy(
-                vertices.as_ptr(),
-                host_mapped_memory.cast(),
-                vertices.len()
-            );
-            self.logical_device.unmap_memory(vertex_device_memory);
-        }
-
-        self.vertex_buffer = Some(vertex_buffer);
-        self.vertex_device_memory = Some(vertex_device_memory);
-
-        self.upload_indices(indices)?;
-
-        self.graphics_queue.record_command_buffers(&self.logical_device, 
-                                                   &self.swapchain, 
-                                                   self.render_pass, 
-                                                   &self.pipeline, 
-                                                   |logical_device: &Device, command_buffer: vk::CommandBuffer| unsafe {
-            logical_device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
-            logical_device.cmd_bind_index_buffer(command_buffer, self.index_buffer.unwrap(), 0, vk::IndexType::UINT16);
-            logical_device.cmd_draw_indexed(command_buffer, indices.len() as u32, 1, 0, 0, 0);
-        });
-
-        Ok(())
-    }
-
-    pub fn display(&mut self) -> Result<(), DisplayEngineError> {
+    pub fn display(&mut self, window: &winit::window::Window) -> Result<(), DisplayEngineError> {
         unsafe {
             self.logical_device.wait_for_fences(
                 &[self.in_flight_fences[self.current_frame]], 
@@ -359,10 +298,16 @@ impl DisplayEngine {
             .map_err(|_| DisplayEngineError::WaitForFenceError)?;
         }
 
-        let image_index = self.swapchain.acquire_next_image(&self.logical_device, 
-                                                            &self.image_available_semaphores[self.current_frame], 
-                                                            self.in_flight_fences[self.current_frame])
-            .map_err(|_| DisplayEngineError::InitializationError)?;
+        let result = self.swapchain.acquire_next_image(
+            &self.logical_device, 
+            &self.image_available_semaphores[self.current_frame], 
+            self.in_flight_fences[self.current_frame]
+        );
+        let image_index = match result {
+            Ok(image_index) => image_index as usize,
+            Err(SwapchainError::OutOfDate) => return self.recreate_swapchain(window),
+            _ => return Err(DisplayEngineError::UnknownError),
+        }; 
 
         unsafe {
             if !self.swapchain.images_in_flight[image_index].is_null() {
@@ -370,7 +315,7 @@ impl DisplayEngine {
                 self.logical_device.wait_for_fences(&[fence], true, u64::MAX)
                     .map_err(|_| DisplayEngineError::WaitForFenceError)?;
             }
-            self.swapchain.images_in_flight[image_index as usize] =
+            self.swapchain.images_in_flight[image_index] =
                 self.in_flight_fences[self.current_frame];
 
             self.update_uniform_buffer(image_index)?;
@@ -400,9 +345,13 @@ impl DisplayEngine {
             .swapchains(swapchains)
             .image_indices(image_indices);
         unsafe { 
-            self.logical_device
-                .queue_present_khr(self.present_queue.handle, &present_info)
-                .map_err(|_| DisplayEngineError::InitializationError)?;
+            let result = self.logical_device
+                .queue_present_khr(self.present_queue.handle, &present_info);
+            match result {
+                Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(window),
+                Ok(vk::SuccessCode::SUBOPTIMAL_KHR) => return self.recreate_swapchain(window),
+                _ => {}
+            }
         }
 
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -489,12 +438,16 @@ impl DisplayEngine {
         }
     }
 
-    fn select_physical_device(vk_instance: &Instance, surface: &vk::SurfaceKHR, device_extensions: &[vk::ExtensionName]) 
+    fn select_physical_device(
+        vk_instance: &Instance, 
+        surface: &vk::SurfaceKHR, 
+        device_extensions: &[vk::ExtensionName],
+        texture_description: &TextureDescription) 
     -> Result<(vk::PhysicalDevice, u32, u32), DisplayEngineError> {
         unsafe {
             let mut elligible_devices = Vec::<(vk::PhysicalDevice, u32, u32)>::new();
             for physical_device in vk_instance.enumerate_physical_devices()
-                                              .map_err(|_| DisplayEngineError::NoGraphicsDeviceFound)? {
+                    .map_err(|_| DisplayEngineError::NoGraphicsDeviceFound)? {
                 let extensions = vk_instance
                     .enumerate_device_extension_properties(physical_device, None)
                     .map_err(|_| DisplayEngineError::DeviceExtensionEnumerationError)?
@@ -502,11 +455,13 @@ impl DisplayEngine {
                     .map(|e| e.extension_name)
                     .collect::<HashSet<_>>();
                 let swapchain_support = SwapchainSupportDetails::new(vk_instance, physical_device, *surface)
-                                                                .map_err(|_| DisplayEngineError::InitializationError)?;
+                    .map_err(|_| DisplayEngineError::InitializationError)?;
                 let features = vk_instance.get_physical_device_features(physical_device);
-                if device_extensions.iter().all(|ext| extensions.contains(ext)) && swapchain_support.valid() &&
-                   features.sampler_anisotropy == vk::TRUE {
-                    let queue_family_properties = vk_instance.get_physical_device_queue_family_properties(physical_device);
+                if device_extensions.iter().all(|ext| extensions.contains(ext)) 
+                   && swapchain_support.valid(texture_description) 
+                   && features.sampler_anisotropy == vk::TRUE {
+                    let queue_family_properties = vk_instance
+                        .get_physical_device_queue_family_properties(physical_device);
 
                     let graphics_queue_families = queue_family_properties
                         .iter()
@@ -518,7 +473,9 @@ impl DisplayEngine {
                         .enumerate()
                         .map(|(i, _)| i as u32)
                         .find(|i| {
-                            vk_instance.get_physical_device_surface_support_khr(physical_device, *i, *surface).unwrap_or(false)
+                            vk_instance
+                                .get_physical_device_surface_support_khr(physical_device, *i, *surface)
+                                .unwrap_or(false)
                         });
 
                     if let (Some(graphics_queue_family), Some(present_queue_family)) = (graphics_queue_families, present_queue_families) {
@@ -542,11 +499,12 @@ impl DisplayEngine {
         }
     }
 
-    fn create_logical_device(graphics_queue_family_index: u32,
-                             present_queue_family_index: u32,
-                             physical_device: vk::PhysicalDevice,
-                             vk_instance: &Instance,
-                             device_extensions: &[vk::ExtensionName]) 
+    fn create_logical_device(
+        graphics_queue_family_index: u32,
+        present_queue_family_index: u32,
+        physical_device: vk::PhysicalDevice,
+        vk_instance: &Instance,
+        device_extensions: &[vk::ExtensionName]) 
     -> Result<Device, DisplayEngineError> {
         let queue_priorities = &[1.0];
         let mut queue_indices = HashSet::new();
@@ -618,13 +576,14 @@ impl DisplayEngine {
                         surface: vk::SurfaceKHR,
                         window: &winit::window::Window,
                         graphics_queue: &DeviceQueue,
-                        present_queue: &DeviceQueue) 
+                        present_queue: &DeviceQueue,
+                        color_format: vk::Format) 
     -> Result<Swapchain, DisplayEngineError> {
         let surface_format: vk::SurfaceFormatKHR = match swapchain_support.formats
             .iter()
             .cloned()
             .find(|f| {
-                f.format == COLOR_FORMAT && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                f.format == color_format && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             }) {
                 Some(format) => format,
                 None => return Err(DisplayEngineError::FormatNotSupported)
@@ -689,18 +648,11 @@ impl Drop for DisplayEngine {
                 .iter()
                 .for_each(|f| self.logical_device.destroy_fence(*f, None));
             self.texture_uploader.destroy(&self.logical_device);
+            self.vertex_uploader.destroy(&self.logical_device);
             self.logical_device.destroy_render_pass(self.render_pass, None);
         }
         self.swapchain.destroy(&self.logical_device);
         unsafe {
-            if self.index_buffer != None {
-                self.logical_device.destroy_buffer(self.index_buffer.unwrap(), None);
-                self.logical_device.free_memory(self.index_device_memory.unwrap(), None);
-            }
-            if self.vertex_buffer != None {
-                self.logical_device.destroy_buffer(self.vertex_buffer.unwrap(), None);
-                self.logical_device.free_memory(self.vertex_device_memory.unwrap(), None);
-            }
             self.logical_device.destroy_sampler(self.texture_sampler, None);
             self.vk_instance.destroy_surface_khr(self.surface, None);
             self.logical_device.destroy_device(None);

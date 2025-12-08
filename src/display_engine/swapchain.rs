@@ -1,13 +1,11 @@
-use super::COLOR_FORMAT;
-
-use super::memory_management;
-use crate::display_engine::DisplayEngineError;
-use crate::display_engine::DeviceQueue;
-use crate::display_engine::swapchain;
 use vulkanalia::prelude::v1_0::*;
 use vulkanalia::vk::KhrSurfaceExtensionInstanceCommands;
 use vulkanalia::vk::KhrSwapchainExtensionDeviceCommands;
-use vulkanalia::vk::PFN_vkFlushMappedMemoryRanges;
+
+use super::memory_management;
+use super::DeviceQueue;
+use super::texture::TextureDescription;
+
 
 pub struct SwapchainSupportDetails {
     pub capabilities: vk::SurfaceCapabilitiesKHR,
@@ -15,6 +13,7 @@ pub struct SwapchainSupportDetails {
     pub present_modes: Vec<vk::PresentModeKHR>,
 }
 pub enum SwapchainError {
+    UnknownError,
     CreationError,
     FormatNotSupported,
     PresentModeNotSupported,
@@ -22,6 +21,7 @@ pub enum SwapchainError {
     AcquireNextImageError,
     WaitForFenceError,
     SupportDetailsCouldNotBeQueried,
+    OutOfDate,
 }
 
 
@@ -45,14 +45,16 @@ impl SwapchainSupportDetails {
         }
     }
 
-    pub fn valid(&self) -> bool {
+    pub fn valid(&self, texture_description: &TextureDescription) -> bool {
         self.formats
             .iter()
             .cloned()
             .find(|f| {
-                f.format == COLOR_FORMAT && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                f.format == texture_description.vk_format() && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             }).is_some() &&
-        !self.present_modes.is_empty()
+        !self.present_modes.is_empty() &&
+        self.capabilities.max_image_extent.width >= texture_description.width as u32 &&
+        self.capabilities.max_image_extent.height >= texture_description.height as u32
     }
 }
 
@@ -63,7 +65,6 @@ pub struct Swapchain {
     pub image_views: Vec<vk::ImageView>,
     framebuffers: Vec<vk::Framebuffer>,
     pub images_in_flight: Vec<vk::Fence>,
-    image_count: u32,
     image_format: vk::Format,
 }
 
@@ -138,7 +139,6 @@ impl Swapchain {
             image_views,
             framebuffers: vec![],
             images_in_flight,
-            image_count,
             image_format: surface_format.format,
         });
     }
@@ -164,7 +164,7 @@ impl Swapchain {
                               image_available_sem: &vk::Semaphore, 
                               in_flight_fence: vk::Fence) 
     -> Result<usize, SwapchainError> {
-        let image_index = unsafe {
+        let result = unsafe {
             logical_device
             .acquire_next_image_khr(
                 self.swapchain,
@@ -172,8 +172,11 @@ impl Swapchain {
                 *image_available_sem,
                 vk::Fence::null(),
             )
-            .map_err(|_| SwapchainError::AcquireNextImageError)?
-            .0 as usize
+        };
+        let image_index = match result {
+            Ok((image_index, _)) => image_index as usize,
+            Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return Err(SwapchainError::OutOfDate),
+            _ => return Err(SwapchainError::UnknownError)
         };
 
         if !self.images_in_flight[image_index].is_null() {

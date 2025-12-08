@@ -1,5 +1,3 @@
-use super::COLOR_FORMAT;
-
 use std::path::Path;
 use vulkanalia::prelude::v1_0::*;
 use vulkanalia::bytecode::Bytecode;
@@ -145,7 +143,8 @@ impl Pipeline {
         let descriptor_set_layout_create_info = vk::DescriptorSetLayoutCreateInfo::builder()
             .bindings(bindings);
         let descriptor_set_layout = unsafe {
-            logical_device.create_descriptor_set_layout(&descriptor_set_layout_create_info, None)
+            logical_device
+                .create_descriptor_set_layout(&descriptor_set_layout_create_info, None)
                 .map_err(|_| PipelineError::CreationError)?
         };
         let set_layouts = &[descriptor_set_layout];
@@ -153,8 +152,9 @@ impl Pipeline {
         let layout_info = vk::PipelineLayoutCreateInfo::builder()
             .set_layouts(set_layouts);
         let pipeline_layout = unsafe { 
-            logical_device.create_pipeline_layout(&layout_info, None)
-                          .map_err(|_| PipelineError::CreationError)?
+            logical_device
+                .create_pipeline_layout(&layout_info, None)
+                .map_err(|_| PipelineError::CreationError)?
         };
 
         let vert_path = Path::new(shader_dir_path).join("shaders\\vert.spv");
@@ -251,7 +251,6 @@ impl Pipeline {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(descr_buffer_infos);
-
 
             let descr_image_info = vk::DescriptorImageInfo::builder()
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)

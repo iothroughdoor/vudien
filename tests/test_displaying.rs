@@ -1,20 +1,10 @@
-use multi_platform_medical_imaging::display_engine::graphics_pipeline::Vertex;
 use multi_platform_medical_imaging::display_engine::DisplayEngine;
 use multi_platform_medical_imaging::display_engine::DisplayEngineError;
-use cgmath::{vec2, vec3};
-
-static VERTICES: [Vertex; 4] = [
-    Vertex{position: vec2(-0.5, -0.5), color: vec3(u8::MAX, 0, 0)            , _padding: 0, tex_coord: vec2(0.0, 0.0)},
-    Vertex{position: vec2(0.5, -0.5) , color: vec3(0, u8::MAX, 0)            , _padding: 0, tex_coord: vec2(1.0, 0.0)},
-    Vertex{position: vec2(0.5, 0.5)  , color: vec3(0, 0, u8::MAX)            , _padding: 0, tex_coord: vec2(1.0, 1.0)},
-    Vertex{position: vec2(-0.5, 0.5) , color: vec3(u8::MAX, u8::MAX, u8::MAX), _padding: 0, tex_coord: vec2(0.0, 1.0)},
-];
-
-const INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
+use multi_platform_medical_imaging::display_engine::texture::{Texture, TextureColorFormat, TextureDescription};
 
 fn main() -> Result<(), DisplayEngineError> {
-    const WIDTH: i32 = 976;
-    const HEIGHT: i32 = 976;
+    const WIDTH: i32 =  838;  
+    const HEIGHT: i32 = 1024;
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
 
@@ -24,12 +14,14 @@ fn main() -> Result<(), DisplayEngineError> {
         .build(&event_loop)
         .unwrap();
 
-    let texture = multi_platform_medical_imaging::display_engine::texture::Texture::from_raw_file(
-        &std::path::Path::new("data/976x976xu8.raw")
-    ).unwrap();
 
-    let mut display_engine = DisplayEngine::new(&window)?;
-    display_engine.upload_vertices(&VERTICES, &INDICES)?;
+    let description = TextureDescription {
+        width: WIDTH as usize,
+        height: HEIGHT as usize,
+        format: TextureColorFormat::GrayScale8Bit,
+    };
+    let texture = Texture::from_raw_file(&std::path::Path::new("data/838x1024xu8.raw"), &description).unwrap();
+    let mut display_engine = DisplayEngine::new(&window, &description)?;
     display_engine.upload_texture(texture)?;
     event_loop.run(move |event, elwt| {
         match event {
@@ -39,14 +31,13 @@ fn main() -> Result<(), DisplayEngineError> {
                     elwt.exit();
                 }
                 winit::event::WindowEvent::RedrawRequested => {
-                    display_engine.display().unwrap();
+                    display_engine.display(&window).unwrap();
                 }
                 _ => {}
             },
             _ => {}
         }
     }).unwrap();
-    println!("This is the end of the line.");
 
     Ok(())
 }

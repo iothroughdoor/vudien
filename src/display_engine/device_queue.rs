@@ -17,42 +17,73 @@ pub enum DeviceQueueError {
 pub struct DeviceQueue {
     pub family_index: u32,
     pub handle: vk::Queue,
-    pub command_pool: Option<vk::CommandPool>,
+    pub command_pool: vk::CommandPool,
     pub command_buffers: Option<Vec<vk::CommandBuffer>>,
 }
 
 impl DeviceQueue {
-    pub fn create_command_infrastructure(
-        &mut self, 
-        logical_device: &Device, 
-        image_count: u32) 
-    -> Result<(), DeviceQueueError> {
-        let command_buffer_count = image_count;
-
+    pub fn new(family_index: u32, handle: vk::Queue, logical_device: &Device) -> Result<DeviceQueue, DeviceQueueError> {
         let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
-            .queue_family_index(self.family_index);
+            .queue_family_index(family_index);
         let command_pool = unsafe {
             logical_device
                 .create_command_pool(&command_pool_create_info, None)
                 .map_err(|_| DeviceQueueError::CommandPoolCreationError)?
         };
+
+        Ok(DeviceQueue { 
+            family_index, 
+            handle, 
+            command_pool, 
+            command_buffers: None 
+        })
+    }
+
+    //pub fn create_command_infrastructure(
+    //    &mut self, 
+    //    logical_device: &Device, 
+    //    image_count: u32) 
+    //-> Result<(), DeviceQueueError> {
+    //    let command_buffer_count = image_count;
+
+    //    let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
+    //        .queue_family_index(self.family_index);
+    //    let command_pool = unsafe {
+    //        logical_device
+    //            .create_command_pool(&command_pool_create_info, None)
+    //            .map_err(|_| DeviceQueueError::CommandPoolCreationError)?
+    //    };
+    //    let command_buffers_alloc_info = vk::CommandBufferAllocateInfo::builder()
+    //        .command_pool(command_pool)
+    //        .level(vk::CommandBufferLevel::PRIMARY)
+    //        .command_buffer_count(command_buffer_count);
+    //    let command_buffers = unsafe {
+    //        logical_device.allocate_command_buffers(&command_buffers_alloc_info)
+    //            .map_err(|_| DeviceQueueError::CommandBufferAllocationError)?
+    //    };
+    //    self.command_pool = command_pool;
+    //    self.command_buffers = Some(command_buffers);
+
+    //    Ok(())
+    //}
+
+    pub fn allocate_command_buffers(&mut self, logical_device: &Device, command_buffer_count: u32) 
+    -> Result<(), DeviceQueueError> {
         let command_buffers_alloc_info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(command_pool)
+            .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(command_buffer_count);
         let command_buffers = unsafe {
             logical_device.allocate_command_buffers(&command_buffers_alloc_info)
                 .map_err(|_| DeviceQueueError::CommandBufferAllocationError)?
         };
-        self.command_pool = Some(command_pool);
         self.command_buffers = Some(command_buffers);
-
         Ok(())
     }
 
     pub fn begin_single_time_commands(&self, logical_device: &Device) -> Result<vk::CommandBuffer, DeviceQueueError> {
         let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(self.command_pool.unwrap())
+            .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         
@@ -97,20 +128,21 @@ impl DeviceQueue {
                 .queue_wait_idle(self.handle)
                 .map_err(|_| DeviceQueueError::QueueWaitError)?;
 
-            logical_device.free_command_buffers(self.command_pool.unwrap(), command_buffers);
+            logical_device.free_command_buffers(self.command_pool, command_buffers);
         }
 
         Ok(())
     }
 
-    pub fn record_command_buffers<F>(&self,     
-                                     logical_device: &Device, 
-                                     swapchain: &Swapchain,
-                                     render_pass: vk::RenderPass, 
-                                     pipeline: &Pipeline,
-                                     record_drawing: F)
-        where F: Fn(&Device, vk::CommandBuffer)
-    {
+    pub fn record_drawing_command_buffers(&self,     
+                                          logical_device: &Device, 
+                                          swapchain: &Swapchain,
+                                          render_pass: vk::RenderPass, 
+                                          pipeline: &Pipeline,
+                                          vertex_buffer: vk::Buffer,
+                                          index_buffer: vk::Buffer,
+                                          index_count: usize
+    ) {
         for (i, &command_buffer) in self.command_buffers.as_ref().unwrap().iter().enumerate() {
             let begin_info = vk::CommandBufferBeginInfo::builder();
             unsafe {
@@ -141,19 +173,27 @@ impl DeviceQueue {
                     &[pipeline.descriptor_sets[i]],
                     &[],
                 );
-                record_drawing(logical_device, command_buffer);
+                logical_device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer], &[0]);
+                logical_device.cmd_bind_index_buffer(command_buffer, index_buffer, 0, vk::IndexType::UINT16);
+                logical_device.cmd_draw_indexed(command_buffer, index_count as u32, 1, 0, 0, 0);
                 logical_device.cmd_end_render_pass(command_buffer);
                 logical_device.end_command_buffer(command_buffer).unwrap();
             }
         }
     }
 
-    pub fn destroy(&self, logical_device: &Device) {
-        if let Some(command_pool) = self.command_pool {
-            unsafe {
-                logical_device.destroy_command_pool(command_pool, None);
+    pub fn destroy_command_buffers(&self, logical_device: &Device) {
+        match &self.command_buffers {
+            Some(command_buffers) => unsafe {
+                logical_device.free_command_buffers(self.command_pool, command_buffers);
             }
+            _ => {}
         }
-        
+    }
+
+    pub fn destroy(&self, logical_device: &Device) {
+        unsafe {
+            logical_device.destroy_command_pool(self.command_pool, None);
+        }
     }
 }

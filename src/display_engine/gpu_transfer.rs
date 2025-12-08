@@ -1,13 +1,16 @@
+use std::cmp::max;
+use std::ptr::copy_nonoverlapping as memcpy;
 use vulkanalia::prelude::v1_0::*;
 use vulkanalia::vk::PhysicalDeviceMemoryProperties;
-use std::ptr::copy_nonoverlapping as memcpy;
+use cgmath::{vec2, vec3};
 
+use super::graphics_pipeline::Vertex;
 use super::memory_management;
 use super::device_queue::{DeviceQueue, DeviceQueueError};
-use super::texture::{Texture, TextureFormat};
+use super::texture::{Texture, TextureDescription, TextureColorFormat};
 
 pub struct TextureUploader {
-    pub texture_format: TextureFormat,
+    pub texture_description: TextureDescription,
     pub texture_image: vk::Image,
     pub texture_image_memory: vk::DeviceMemory,
     pub texture_image_view: vk::ImageView,
@@ -19,22 +22,25 @@ pub enum TextureUploaderError {
     UnknownError,
     InitializationError,
     MemoryMappingError,
-    UnsupportedFormat,
+    UnsupportedTexture,
     CommandRecordingError,
 }
 
 impl TextureUploader {
-    pub fn new(width: u32, 
-           height: u32, 
-           pixel_format: vk::Format, 
-           logical_device: &Device, 
-           physical_device_memory_properties: &PhysicalDeviceMemoryProperties)
+    pub fn new(
+        texture_description: &TextureDescription,
+        logical_device: &Device, 
+        physical_device_memory_properties: &PhysicalDeviceMemoryProperties)
     -> Result<Self, TextureUploaderError> {
+        let vk_format = match texture_description.format {
+            TextureColorFormat::GrayScale8Bit => vk::Format::R8G8B8A8_UNORM,
+        };
+
         let (texture_image, texture_image_memory) = memory_management::create_image(
             logical_device,
-            width,
-            height,
-            pixel_format,
+            texture_description.width as u32,
+            texture_description.height as u32,
+            vk_format,
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -44,24 +50,19 @@ impl TextureUploader {
         let texture_image_view = memory_management::create_image_view(
             logical_device,
             texture_image,
-            pixel_format
+            vk_format
         ).map_err(|_| TextureUploaderError::InitializationError)?;
 
-        let texture_size_in_bytes = Self::texture_size(width as usize, height as usize, pixel_format)?;
         let (staging_buffer, staging_buffer_device_memory) = memory_management::create_buffer(
             logical_device,
-            texture_size_in_bytes as vk::DeviceSize,
+            texture_description.size() as vk::DeviceSize,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             physical_device_memory_properties
         ).map_err(|_| TextureUploaderError::InitializationError)?;
 
         Ok(TextureUploader {
-            texture_format: TextureFormat {
-                width: width as usize,
-                height: height as usize,
-                bytes_per_pixel: Self::pixel_size(pixel_format)?
-            },
+            texture_description: texture_description.clone(),
             texture_image,
             texture_image_memory,
             texture_image_view,
@@ -85,8 +86,8 @@ impl TextureUploader {
               logical_device: &Device, 
               graphics_queue: &DeviceQueue) 
     -> Result<(), TextureUploaderError> {
-        if self.texture_format != texture.format {
-            return Err(TextureUploaderError::UnsupportedFormat);
+        if self.texture_description != texture.description {
+            return Err(TextureUploaderError::UnsupportedTexture);
         }
 
         let host_mapped_memory = unsafe {
@@ -111,8 +112,8 @@ impl TextureUploader {
             graphics_queue
         )?;
 
-        self.copy_buffer_to_image(self.texture_format.width as u32,
-                                  self.texture_format.height as u32,
+        self.copy_buffer_to_image(self.texture_description.width as u32,
+                                  self.texture_description.height as u32,
                                   logical_device,
                                   graphics_queue)?;
 
@@ -131,7 +132,7 @@ impl TextureUploader {
             vk::Format::R8G8B8A8_UNORM => Ok(4 as usize),
             vk::Format::R8G8B8_UNORM => Ok(3 as usize),
             vk::Format::R16G16B16A16_SFLOAT => Ok(8 as usize),
-            _ => Err(TextureUploaderError::UnsupportedFormat)
+            _ => Err(TextureUploaderError::UnsupportedTexture)
         }
     }
 
@@ -261,4 +262,146 @@ impl TextureUploader {
         Ok(())
     }
 
+}
+
+pub struct VertexUploader {
+    pub vertex_buffer: vk::Buffer,
+    pub vertex_buffer_device_memory: vk::DeviceMemory,
+    pub index_buffer: vk::Buffer,
+    pub index_buffer_device_memory: vk::DeviceMemory,
+    pub staging_buffer: vk::Buffer,
+    pub staging_buffer_device_memory: vk::DeviceMemory,
+}
+
+pub enum VertexUploaderError {
+    UnknownError,
+    MemoryError,
+    MemoryMappingError,
+    BufferCreationError,
+}
+
+pub static VERTICES: [Vertex; 4] = [
+    Vertex{position: vec2(-0.5, -0.5), color: vec3(u8::MAX, 0, 0)            , _padding: 0, tex_coord: vec2(0.0, 0.0)},
+    Vertex{position: vec2(0.5, -0.5) , color: vec3(0, u8::MAX, 0)            , _padding: 0, tex_coord: vec2(1.0, 0.0)},
+    Vertex{position: vec2(0.5, 0.5)  , color: vec3(0, 0, u8::MAX)            , _padding: 0, tex_coord: vec2(1.0, 1.0)},
+    Vertex{position: vec2(-0.5, 0.5) , color: vec3(u8::MAX, u8::MAX, u8::MAX), _padding: 0, tex_coord: vec2(0.0, 1.0)},
+];
+
+pub const INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
+
+impl VertexUploader {
+    pub fn new(
+        logical_device: &Device,
+        physical_device_memory_properties: &PhysicalDeviceMemoryProperties
+    ) -> Result<Self, VertexUploaderError> {
+        let indices_size = std::mem::size_of::<u16>() * INDICES.len();
+        let vertices_size = std::mem::size_of::<Vertex>() * VERTICES.len();
+
+        let (vertex_buffer, vertex_buffer_device_memory) = memory_management::create_buffer(
+            logical_device,
+            vertices_size as vk::DeviceSize,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            physical_device_memory_properties
+        ).map_err(|_| VertexUploaderError::BufferCreationError)?;
+
+        let (index_buffer, index_buffer_device_memory) = memory_management::create_buffer(
+            logical_device,
+            indices_size as vk::DeviceSize,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            physical_device_memory_properties
+        ).map_err(|_| VertexUploaderError::MemoryError)?;
+
+        let (staging_buffer, staging_buffer_device_memory) = memory_management::create_buffer(
+            logical_device,
+            max(indices_size, vertices_size) as vk::DeviceSize,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            physical_device_memory_properties
+        ).map_err(|_| VertexUploaderError::MemoryError)?;
+
+        Ok(VertexUploader {
+            vertex_buffer,
+            vertex_buffer_device_memory,
+            index_buffer,
+            index_buffer_device_memory,
+            staging_buffer,
+            staging_buffer_device_memory,
+        })
+    }
+
+    pub fn destroy(&self, logical_device: &Device) {
+        unsafe {
+            logical_device.destroy_buffer(self.staging_buffer, None);
+            logical_device.free_memory(self.staging_buffer_device_memory, None);
+            logical_device.destroy_buffer(self.index_buffer, None);
+            logical_device.free_memory(self.index_buffer_device_memory, None);
+            logical_device.destroy_buffer(self.vertex_buffer, None);
+            logical_device.free_memory(self.vertex_buffer_device_memory, None);
+        }
+    }
+
+    pub fn upload(
+        &self,
+        logical_device: &Device,
+        graphics_queue: &DeviceQueue
+    ) -> Result<(), VertexUploaderError> {
+        let vertices_size = std::mem::size_of::<Vertex>() * VERTICES.len();
+        let indices_size = std::mem::size_of::<u16>() * INDICES.len();
+
+        let host_mapped_memory = unsafe {
+            logical_device.map_memory(
+                self.staging_buffer_device_memory,
+                0,
+                max(vertices_size, indices_size) as vk::DeviceSize,
+                vk::MemoryMapFlags::empty()
+            ).map_err(|_| VertexUploaderError::MemoryMappingError)?
+        };
+
+        unsafe {
+            memcpy(
+                VERTICES.as_ptr() as *const u8,
+                host_mapped_memory.cast(),
+                vertices_size
+            );
+            logical_device.unmap_memory(self.staging_buffer_device_memory);
+        }
+
+        memory_management::copy_buffer(
+            logical_device,
+            self.staging_buffer,
+            self.vertex_buffer,
+            vertices_size as vk::DeviceSize,
+            graphics_queue
+        ).map_err(|_| VertexUploaderError::UnknownError)?;
+
+        let host_mapped_memory = unsafe {
+            logical_device.map_memory(
+                self.staging_buffer_device_memory,
+                0,
+                indices_size as vk::DeviceSize,
+                vk::MemoryMapFlags::empty()
+            ).map_err(|_| VertexUploaderError::MemoryMappingError)?
+        };
+
+        unsafe {
+            memcpy(
+                INDICES.as_ptr() as *const u8,
+                host_mapped_memory.cast(),
+                indices_size
+            );
+            logical_device.unmap_memory(self.staging_buffer_device_memory);
+        }
+
+        memory_management::copy_buffer(
+            logical_device,
+            self.staging_buffer,
+            self.index_buffer,
+            indices_size as vk::DeviceSize,
+            graphics_queue
+        ).map_err(|_| VertexUploaderError::UnknownError)?;
+
+        Ok(())
+    }
 }
