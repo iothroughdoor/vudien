@@ -19,8 +19,7 @@ use graphics_pipeline::{Mat4, UniformBufferObject};
 use texture::{Texture, TextureDescription};
 use gpu_transfer::{TextureUploader, TextureUploaderError, VertexUploader};
 
-const VALIDATION_ENABLED: bool =
-    cfg!(debug_assertions);
+const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
 const VALIDATION_LAYER: vk::ExtensionName =
     vk::ExtensionName::from_bytes(b"VK_LAYER_KHRONOS_validation");
@@ -181,7 +180,7 @@ impl DisplayEngine {
             &logical_device, 
             &swapchain, 
             render_pass, 
-            "D:\\dev\\multi-platform-medical-imaging\\data", 
+            "/home/philipp/dev/vudien/data", 
             &physical_device_memory_properties, 
             texture_uploader.texture_image_view,
             texture_sampler
@@ -255,7 +254,7 @@ impl DisplayEngine {
             &self.logical_device, 
             &self.swapchain, 
             self.render_pass, 
-            "D:\\dev\\multi-platform-medical-imaging\\data", 
+            "/home/philipp/dev/vudien/data", 
             &self.physical_device_memory_properties, 
             self.texture_uploader.texture_image_view,
             self.texture_sampler
@@ -428,8 +427,8 @@ impl DisplayEngine {
 
         let create_info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
-            .enabled_extension_names(&extensions)
-            .enabled_layer_names(&layers);
+            .enabled_extension_names(&extensions);
+            //.enabled_layer_names(&layers);
 
         unsafe {
             let instance = entry.create_instance(&create_info, None)
@@ -518,13 +517,11 @@ impl DisplayEngine {
                     .queue_priorities(queue_priorities)
             })
             .collect::<Vec<_>>();
-        let layers = vec![];
         let extensions = device_extensions.iter().map(|e| e.as_ptr()).collect::<Vec<_>>();
         let features = vk::PhysicalDeviceFeatures::builder()
             .sampler_anisotropy(true);
         let device_create_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queue_infos)
-            .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions)
             .enabled_features(&features);
         unsafe {

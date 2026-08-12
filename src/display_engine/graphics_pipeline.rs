@@ -157,8 +157,8 @@ impl Pipeline {
                 .map_err(|_| PipelineError::CreationError)?
         };
 
-        let vert_path = Path::new(shader_dir_path).join("shaders\\vert.spv");
-        let frag_path = Path::new(shader_dir_path).join("shaders\\frag.spv");
+        let vert_path = Path::new(shader_dir_path).join("shaders/vert.spv");
+        let frag_path = Path::new(shader_dir_path).join("shaders/frag.spv");
         let vert = std::fs::read(vert_path)
             .map_err(|_| PipelineError::CreationError)?;
         let frag = std::fs::read(frag_path)

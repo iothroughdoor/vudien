@@ -30,7 +30,7 @@ impl TextureDescription {
 
     pub fn vk_format(&self) -> vk::Format {
         match self.format {
-            TextureColorFormat::GrayScale8Bit => vk::Format::R8G8B8A8_UNORM,
+            TextureColorFormat::GrayScale8Bit => vk::Format::B8G8R8A8_UNORM,
         }
     }
 }
